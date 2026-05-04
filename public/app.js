@@ -351,6 +351,29 @@ function captureFrame() {
   return canvas.toDataURL('image/jpeg', 0.92);
 }
 
+// ─── Preprocessing ────────────────────────────────────────────────────────────
+
+/**
+ * POST the captured image to /preprocess (sharp pipeline on the server).
+ * Falls back to the original image if the request fails.
+ */
+async function preprocessImage(imageDataURL) {
+  progressLabel.textContent = 'Preprocessing image…';
+  try {
+    const res = await fetch('/preprocess', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: imageDataURL }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { image } = await res.json();
+    return image;
+  } catch (err) {
+    console.warn('Preprocessing failed, using original image:', err);
+    return imageDataURL;
+  }
+}
+
 // ─── OCR ──────────────────────────────────────────────────────────────────────
 
 async function runOCR(imageDataURL) {
@@ -514,7 +537,11 @@ btnScan.addEventListener('click', async () => {
   captureThumb.src = imageDataURL;
 
   try {
-    const ocrText = await runOCR(imageDataURL);
+    const processedImageURL = await preprocessImage(imageDataURL);
+    // Show the preprocessed image so the user can see what Tesseract is working with
+    captureThumb.src = processedImageURL;
+
+    const ocrText = await runOCR(processedImageURL);
     console.log('OCR result:\n', ocrText);
 
     state.parsedItems = extractCallNumbersFromOCR(ocrText);
