@@ -351,55 +351,30 @@ function captureFrame() {
   return canvas.toDataURL('image/jpeg', 0.92);
 }
 
-// ─── Preprocessing ────────────────────────────────────────────────────────────
+// ─── Vision extraction ────────────────────────────────────────────────────────
 
 /**
- * POST the captured image to /preprocess (sharp pipeline on the server).
- * Falls back to the original image if the request fails.
+ * Send the captured image to the server, which calls OpenAI vision
+ * and returns an array of call number strings in left-to-right shelf order.
  */
-async function preprocessImage(imageDataURL) {
-  progressLabel.textContent = 'Preprocessing image…';
-  try {
-    const res = await fetch('/preprocess', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: imageDataURL }),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const { image } = await res.json();
-    return image;
-  } catch (err) {
-    console.warn('Preprocessing failed, using original image:', err);
-    return imageDataURL;
-  }
-}
+async function extractFromVision(imageDataURL) {
+  progressLabel.textContent = 'Reading labels…';
+  progressBar.style.width = '40%';
 
-// ─── OCR ──────────────────────────────────────────────────────────────────────
-
-async function runOCR(imageDataURL) {
-  const { createWorker } = Tesseract;
-  const worker = await createWorker('eng', 1, {
-    logger: (m) => {
-      if (m.status === 'recognizing text') {
-        const pct = Math.round((m.progress || 0) * 100);
-        progressBar.style.width = pct + '%';
-        progressLabel.textContent = `Recognizing text… ${pct}%`;
-      } else if (m.status === 'loading tesseract core') {
-        progressLabel.textContent = 'Loading OCR engine…';
-      } else if (m.status === 'initializing tesseract') {
-        progressLabel.textContent = 'Initializing OCR…';
-      } else if (m.status === 'loading language traineddata') {
-        progressLabel.textContent = 'Loading language data…';
-      }
-    },
+  const res = await fetch('/extract', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image: imageDataURL }),
   });
 
-  try {
-    const result = await worker.recognize(imageDataURL);
-    return result.data.text;
-  } finally {
-    await worker.terminate();
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `Server error ${res.status}`);
   }
+
+  progressBar.style.width = '100%';
+  const { callNumbers } = await res.json();
+  return callNumbers;
 }
 
 // ─── Render Results ───────────────────────────────────────────────────────────
@@ -532,30 +507,28 @@ btnScan.addEventListener('click', async () => {
   stopCamera();
   showScreen('processing');
   progressBar.style.width = '0%';
-  progressLabel.textContent = 'Starting OCR…';
+  progressLabel.textContent = 'Sending to vision API…';
 
   captureThumb.src = imageDataURL;
 
   try {
-    const processedImageURL = await preprocessImage(imageDataURL);
-    // Show the preprocessed image so the user can see what Tesseract is working with
-    captureThumb.src = processedImageURL;
+    const callNumbers = await extractFromVision(imageDataURL);
+    console.log('Vision result:', callNumbers);
 
-    const ocrText = await runOCR(processedImageURL);
-    console.log('OCR result:\n', ocrText);
-
-    state.parsedItems = extractCallNumbersFromOCR(ocrText);
+    state.parsedItems = callNumbers
+      .map(s => parseLCCallNumber(s))
+      .filter(Boolean);
     state.checkResults = checkShelfOrder(state.parsedItems);
 
     showScreen('results');
     renderResults();
   } catch (err) {
-    console.error('OCR failed:', err);
+    console.error('Vision extract failed:', err);
     showScreen('results');
     state.parsedItems = [];
     state.checkResults = [];
     renderResults();
-    showToast('OCR failed — add call numbers manually');
+    showToast(err.message || 'Failed — add call numbers manually');
   }
 });
 

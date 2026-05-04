@@ -1,6 +1,6 @@
 const express = require('express');
 const path = require('path');
-const sharp = require('sharp');
+const OpenAI = require('openai');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -8,47 +8,51 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+const PROMPT = `You are reading a photo of library book spines.
+Find the small rectangular call number labels (white stickers) near the bottom of each spine.
+Extract every Library of Congress call number you can see, in left-to-right shelf order.
+
+LC call numbers look like: "DD 256.5 .B94 2000" or "E 98 .L3 J65" or "F 869 .S35 L44"
+
+Return ONLY a valid JSON array of strings — one call number per book, no explanation, no markdown.
+If a label is unreadable, make your best guess. Skip publisher labels (PUTNAM, STANFORD, etc).
+Example output: ["DD 256.5 .B94 2000", "E 98 .L3 J65 2000", "F 869 .S35 L44"]`;
+
 /**
- * POST /preprocess
+ * POST /extract
  * Body: { image: "data:image/jpeg;base64,..." }
- * Returns: { image: "data:image/png;base64,..." }
- *
- * Call number labels are small stickers sitting at ~68-78% of image height
- * on a typical phone photo of a shelf. The spine titles above and the shelf
- * below are discarded entirely.
- *
- * Pipeline:
- *   1. Crop to 68-78% of image height — isolates the label row
- *   2. Scale up 3x — gives Tesseract enough resolution for small label text
- *   3. Greyscale → normalize → sharpen → threshold(190) — clean B&W output
+ * Returns: { callNumbers: string[] }
  */
-app.post('/preprocess', async (req, res) => {
+app.post('/extract', async (req, res) => {
   try {
     const { image } = req.body;
     if (!image) return res.status(400).json({ error: 'No image provided' });
 
-    const base64Data = image.replace(/^data:image\/\w+;base64,/, '');
-    const inputBuffer = Buffer.from(base64Data, 'base64');
+    const response = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: image, detail: 'high' } },
+          { type: 'text', text: PROMPT },
+        ],
+      }],
+      max_tokens: 500,
+    });
 
-    const { width, height } = await sharp(inputBuffer).metadata();
+    const text = response.choices[0].message.content.trim();
 
-    const cropTop = Math.round(height * 0.68);
-    const cropHeight = Math.round(height * 0.10);
+    // Strip markdown code fences if model wraps the JSON
+    const json = text.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim();
+    const callNumbers = JSON.parse(json);
 
-    const outputBuffer = await sharp(inputBuffer)
-      .extract({ left: 0, top: cropTop, width, height: cropHeight })
-      .resize({ width: width * 3 })
-      .greyscale()
-      .normalize()
-      .sharpen({ sigma: 1.5 })
-      .threshold(190)
-      .png()
-      .toBuffer();
+    if (!Array.isArray(callNumbers)) throw new Error('Expected JSON array');
 
-    const outputBase64 = 'data:image/png;base64,' + outputBuffer.toString('base64');
-    res.json({ image: outputBase64 });
+    res.json({ callNumbers });
   } catch (err) {
-    console.error('Preprocess error:', err);
+    console.error('Extract error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
